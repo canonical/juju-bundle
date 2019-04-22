@@ -1,0 +1,31 @@
+name: juju-bundle
+base: core18
+version: '0.1.0'
+summary: Juju plugin for easy bundle interactions
+description: |
+  Allows building a bundle as necessary and then deploying it. Also
+  allows removing an existing bundle without touching the other
+  applications in a given model.
+
+grade: devel
+confinement: classic
+
+apps:
+  juju-bundle:
+    command: juju-bundle
+
+parts:
+  juju-bundle:
+    source: .
+    plugin: rust
+    # https://forum.snapcraft.io/t/issue-with-rebuilding-a-rust-snap/10830
+    override-build: |
+      [ -f "$SNAPCRAFT_PART_INSTALL/bin/juju-bundle" ] && rm "$SNAPCRAFT_PART_INSTALL/bin/juju-bundle"
+      snapcraftctl build
+
+architectures:
+  - amd64
+  - arm64
+  - armhf
+  - i386
+  - ppc64el
