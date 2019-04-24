@@ -2,7 +2,7 @@ use std::fs::write;
 use std::process::Command;
 
 use clap::{clap_app, crate_authors, crate_description, crate_version};
-use failure::{Error, ResultExt};
+use failure::{format_err, Error, ResultExt};
 use rayon::prelude::*;
 use tempfile::NamedTempFile;
 
@@ -14,18 +14,18 @@ fn deploy(bundle_path: &str, deploy_args: Vec<&str>) -> Result<(), Error> {
     let mut bundle = Bundle::load(bundle_path)?;
 
     let build_count = bundle
-        .applications()
+        .applications
         .values()
         .filter(|v| v.source.is_some())
         .count();
 
-    println!("Found {} total applications", bundle.applications().len());
+    println!("Found {} total applications", bundle.applications.len());
     println!("Found {} applications to build.\n", build_count);
 
     let temp_bundle = NamedTempFile::new()?;
 
     let mapped: Result<Vec<(NamedTempFile, (String, Application))>, Error> = bundle
-        .applications()
+        .applications
         .par_iter()
         .map(|(name, application)| {
             let mut new_application = application.clone();
@@ -41,7 +41,7 @@ fn deploy(bundle_path: &str, deploy_args: Vec<&str>) -> Result<(), Error> {
                 let charm =
                     Charm::load(&charm_path).with_context(|_| charm_path.display().to_string())?;
 
-                Command::new("charm")
+                let exit_status = Command::new("charm")
                     .args(&["build", &source_dir.join(source).to_string_lossy()])
                     .args(&[
                         "--cache-dir",
@@ -49,6 +49,13 @@ fn deploy(bundle_path: &str, deploy_args: Vec<&str>) -> Result<(), Error> {
                     ])
                     .spawn()?
                     .wait()?;
+
+                if !exit_status.success() {
+                    return Err(format_err!(
+                        "charm build encountered an error: {}",
+                        exit_status.to_string()
+                    ));
+                }
 
                 new_application.charm = build_dir
                     .join(charm.metadata.name)
@@ -77,7 +84,7 @@ fn deploy(bundle_path: &str, deploy_args: Vec<&str>) -> Result<(), Error> {
 
     let (temp_files, applications): (Vec<NamedTempFile>, _) = mapped?.into_iter().unzip();
 
-    *bundle.applications_mut() = applications;
+    bundle.applications = applications;
 
     bundle.save(temp_bundle.path())?;
 
@@ -95,7 +102,7 @@ fn deploy(bundle_path: &str, deploy_args: Vec<&str>) -> Result<(), Error> {
 
 fn remove(bundle_path: &str) -> Result<(), Error> {
     let bundle = Bundle::load(bundle_path)?;
-    for name in bundle.applications().keys() {
+    for name in bundle.applications.keys() {
         Command::new("juju")
             .args(&["remove-application", name])
             .spawn()?
