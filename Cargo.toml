@@ -1,12 +1,15 @@
 [package]
 name = "juju-bundle"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Kenneth Koski <kennethkoski@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-clap = "2.32"
+clap = "3.0.0-beta.2"
+ex = "0.1"
 failure = "0.1"
-rayon = "1.0"
-tempfile = "3.0"
-libjuju = { git = "https://github.com/knkski/rust-libjuju.git" }
+juju-rs = { git = "https://github.com/knkski/rust-libjuju.git" }
+rayon = "1.3"
+structopt = "0.2"
+tempfile = "3.1"
+petgraph = "0.5"
