@@ -8,11 +8,11 @@ description: |
 
 grade: stable
 confinement: classic
-adopt-info: juju-helpers
+adopt-info: juju-bundle
 
 apps:
   juju-bundle:
-    command: juju-bundle
+    command: bin/juju-bundle
 
 parts:
   juju-bundle:
@@ -22,10 +22,9 @@ parts:
     override-build: |
       [ -f "$SNAPCRAFT_PART_INSTALL/bin/juju-bundle" ] && rm "$SNAPCRAFT_PART_INSTALL/bin/juju-bundle"
       snapcraftctl build
-      snapcraftctl set-version $(juju-bundle --version | cut -d' ' -f2)
+      VERSION=$($SNAPCRAFT_PART_INSTALL/bin/juju-bundle --version | cut -d' ' -f2)
+      snapcraftctl set-version $VERSION
 
 architectures:
   - amd64
   - arm64
-  - armhf
-  - ppc64el
