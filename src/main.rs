@@ -17,6 +17,7 @@ use tempfile::{NamedTempFile, TempDir};
 use juju::bundle::{Application, Bundle};
 use juju::channel::Channel;
 use juju::charm_source::CharmSource;
+use juju::charm_url::CharmURL;
 use juju::cmd::run;
 use juju::paths;
 
@@ -77,7 +78,7 @@ struct PublishConfig {
 
     #[structopt(long = "url")]
     #[structopt(help = "The charm store URL for the bundle")]
-    cs_url: String,
+    cs_url: Option<String>,
 
     #[structopt(long = "publish-charms")]
     #[structopt(help = "If set, charms will be built and published")]
@@ -323,6 +324,22 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
     let path = c.bundle.as_str();
     let bundle = Bundle::load(path)?;
 
+    let bundle_url = match (&c.cs_url, &bundle.name) {
+        (Some(url), _) => CharmURL::parse(&url)
+            .map_err(|err| format_err!("Couldn't parse charm URL: {:?}", err))?,
+        (None, Some(name)) => CharmURL {
+            store: Some("ch".into()),
+            namespace: None,
+            name: name.clone(),
+            revision: None,
+        },
+        (None, None) => {
+            return Err(format_err!(
+                "Need to specify either a bundle URL or declare name field in bundle.yaml"
+            ))
+        }
+    };
+
     // Make sure we're logged in first, so that we don't get a bunch of
     // login pages spawn with `charm push`.
     println!("Logging in to charm store, this may open up a browser window.");
@@ -422,13 +439,16 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
 
     // `charm push` expects this file to exist
     fs::copy(
-        PathBuf::from(c.bundle).with_file_name("README.md"),
+        PathBuf::from(&c.bundle).with_file_name("README.md"),
         dir.path().join("README.md"),
     )?;
 
-    let bundle_url = bundle.push(dir.path().to_string_lossy().as_ref(), &c.cs_url)?;
+    fs::copy(
+        PathBuf::from(c.bundle).with_file_name("charmcraft.yaml"),
+        dir.path().join("charmcraft.yaml"),
+    )?;
 
-    bundle.release(&bundle_url, Channel::Edge)?;
+    bundle.push(dir.path().to_string_lossy().as_ref(), &bundle_url)?;
 
     Ok(())
 }
