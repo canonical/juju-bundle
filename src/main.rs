@@ -233,14 +233,8 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
 
                     charm.build(name)?;
 
-                    for (name, resource) in &charm.metadata.resources {
-                        if let Some(source) = &resource.upstream_source {
-                            new_application
-                                .resources
-                                .entry(name.into())
-                                .or_insert_with(|| source.into());
-                        }
-                    }
+                    new_application.resources =
+                        charm.resources_with_defaults(&new_application.resources)?;
 
                     Some(charm.artifact_path())
                 }
@@ -443,10 +437,17 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
         dir.path().join("README.md"),
     )?;
 
-    fs::copy(
+    // Copy `charmcraft.yaml` if it exists
+    let copy_result = fs::copy(
         PathBuf::from(c.bundle).with_file_name("charmcraft.yaml"),
         dir.path().join("charmcraft.yaml"),
-    )?;
+    );
+
+    if let Err(err) = copy_result {
+        if err.kind() != ::std::io::ErrorKind::NotFound {
+            return Err(err.into());
+        }
+    }
 
     bundle.push(dir.path().to_string_lossy().as_ref(), &bundle_url)?;
 
