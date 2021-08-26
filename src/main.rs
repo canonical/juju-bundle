@@ -485,9 +485,9 @@ fn export(c: ExportConfig) -> Result<(), Error> {
         graph.add_node(app);
     }
     for rel in bundle.relations {
-        let app_a = rel[0].split(":").next().unwrap_or(&rel[0]);
-        let app_b = rel[1].split(":").next().unwrap_or(&rel[1]);
-        let rel_name = rel[0].split(":").last().unwrap_or("");
+        let app_a = rel[0].split(':').next().unwrap_or(&rel[0]);
+        let app_b = rel[1].split(':').next().unwrap_or(&rel[1]);
+        let rel_name = rel[0].split(':').last().unwrap_or("");
         let index_a = graph.node_indices().find(|i| graph[*i] == app_a).unwrap();
         let index_b = graph.node_indices().find(|i| graph[*i] == app_b).unwrap();
         graph.add_edge(index_a, index_b, rel_name.to_string());
