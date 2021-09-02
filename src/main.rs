@@ -1,6 +1,5 @@
 //! Juju plugin for interacting with a bundle
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -23,6 +22,34 @@ use juju::paths;
 
 /// CLI arguments for the `deploy` subcommand.
 #[derive(StructOpt, Debug)]
+struct BuildConfig {
+    #[structopt(short = "a", long = "app")]
+    #[structopt(help = "Select particular apps to deploy")]
+    apps: Vec<String>,
+
+    #[structopt(short = "e", long = "except")]
+    #[structopt(help = "Select particular apps to skip deploying")]
+    exceptions: Vec<String>,
+
+    #[structopt(short = "b", long = "bundle", default_value = "bundle.yaml")]
+    #[structopt(help = "The bundle file to deploy")]
+    bundle: String,
+
+    #[structopt(
+        short = "o",
+        long = "output-bundle",
+        default_value = "built-bundle.yaml"
+    )]
+    #[structopt(help = "Path where the built bundle.yaml should be written to")]
+    output_bundle: String,
+
+    #[structopt(long = "destructive-mode")]
+    #[structopt(help = "Build charmcraft charms with `--destructive-mode` flag")]
+    destructive_mode: bool,
+}
+
+/// CLI arguments for the `deploy` subcommand.
+#[derive(StructOpt, Debug)]
 struct DeployConfig {
     #[structopt(long = "recreate")]
     #[structopt(help = "Recreate the bundle by ensuring that it's removed before deploying")]
@@ -35,6 +62,10 @@ struct DeployConfig {
     #[structopt(long = "build")]
     #[structopt(help = "Build the bundle before deploying it. Requires `source:` to be defined")]
     build: bool,
+
+    #[structopt(long = "destructive-mode")]
+    #[structopt(help = "Build charmcraft charms with `--destructive-mode` flag")]
+    destructive_mode: bool,
 
     #[structopt(long = "wait", default_value = "60")]
     #[structopt(help = "How long to wait in seconds for model to stabilize before deploying it")]
@@ -97,6 +128,10 @@ struct PublishConfig {
         help = "If set, docker will be pruned between each charm. Enforces --serial also set."
     )]
     prune: bool,
+
+    #[structopt(long = "destructive-mode")]
+    #[structopt(help = "Build charmcraft charms with `--destructive-mode` flag")]
+    destructive_mode: bool,
 }
 
 /// CLI arguments for the `publish` subcommand.
@@ -136,6 +171,14 @@ struct ExportConfig {
 #[structopt(raw(setting = "AppSettings::TrailingVarArg"))]
 #[structopt(raw(setting = "AppSettings::SubcommandRequiredElseHelp"))]
 enum Config {
+    /// Builds a bundle
+    ///
+    /// Outputs new bundle yaml file pointing at built charms.
+    /// If a subset of apps are chosen, bundle relations are only
+    /// included if both apps are selected.
+    #[structopt(name = "build")]
+    Build(BuildConfig),
+
     /// Deploys a bundle, optionally building and/or recreating it.
     ///
     /// If a subset of apps are chosen, bundle relations are only
@@ -166,85 +209,28 @@ enum Config {
     Export(ExportConfig),
 }
 
+/// Run `build` subcommand
+fn build(c: BuildConfig) -> Result<(), Error> {
+    println!("Building bundle from {}", c.bundle);
+
+    let mut bundle = Bundle::load(c.bundle.clone())?;
+
+    bundle.build(&c.bundle, c.apps.clone(), c.exceptions, c.destructive_mode)?;
+
+    bundle.save(&c.output_bundle)?;
+
+    println!("Bundle saved to {}", c.output_bundle);
+
+    Ok(())
+}
+
 /// Run `deploy` subcommand
 fn deploy(c: DeployConfig) -> Result<(), Error> {
     println!("Building and deploying bundle from {}", c.bundle);
 
     let mut bundle = Bundle::load(c.bundle.clone())?;
 
-    let applications = bundle.app_subset(c.apps.clone(), c.exceptions.clone())?;
-    let build_count = applications
-        .iter()
-        .filter(|(name, app)| app.source(name, &c.bundle).is_some())
-        .count();
-
-    println!("Found {} total applications", applications.len());
-    println!("Found {} applications to build.\n", build_count);
-
-    let temp_bundle = NamedTempFile::new()?;
-
-    // Filter out relations that point to an application that was filtered out
-    bundle.relations = bundle
-        .relations
-        .into_iter()
-        .filter(|rels| {
-            // Strip out interface name-style syntax before filtering,
-            // e.g. `foo:bar` => `foo`.
-            rels.iter()
-                .map(|r| r.split(':').next().unwrap())
-                .collect::<HashSet<_>>()
-                .is_subset(&applications.keys().map(String::as_ref).collect())
-        })
-        .collect();
-
-    let mapped: Result<HashMap<String, Application>, Error> = applications
-        .par_iter()
-        .map(|(name, application)| {
-            let mut new_application = application.clone();
-
-            let source = application.source(name, &c.bundle);
-            new_application.charm = match (c.build, &application.charm, source) {
-                // If a charm URL was defined and either the `--build` flag wasn't passed or
-                // there's no `source` property, deploy the charm URL
-                (false, Some(charm), _) | (_, Some(charm), None) => Some(charm.clone()),
-
-                // Either `charm` or `source` must be set
-                (_, None, None) => {
-                    return Err(format_err!(
-                        "Application {} has neither `charm` nor `source` set.",
-                        name
-                    ));
-                }
-
-                // If the charm source was defined and either the `--build` flag was passed, or
-                // if there's no `charm` property, build the charm
-                (true, _, Some(source)) | (_, None, Some(source)) => {
-                    println!("Building {}", name);
-
-                    // If `source` starts with `.`, it's a relative path from the bundle we're
-                    // deploying. Otherwise, look in `CHARM_SOURCE_DIR` for it.
-                    let charm_path = if source.starts_with('.') {
-                        PathBuf::from(&c.bundle).parent().unwrap().join(source)
-                    } else {
-                        paths::charm_source_dir().join(source)
-                    };
-
-                    let charm = CharmSource::load(&charm_path)?;
-
-                    charm.build(name)?;
-
-                    new_application.resources =
-                        charm.resources_with_defaults(&new_application.resources)?;
-
-                    Some(charm.artifact_path())
-                }
-            };
-
-            Ok((name.clone(), new_application))
-        })
-        .collect();
-
-    bundle.applications = mapped?;
+    bundle.build(&c.bundle, c.apps.clone(), c.exceptions, c.destructive_mode)?;
 
     // If we're only upgrading charms, we can skip the rest of the logic
     // that is concerned with tearing down and/or deploying the charms.
@@ -252,6 +238,7 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
         return Ok(bundle.upgrade_charms()?);
     }
 
+    let temp_bundle = NamedTempFile::new()?;
     bundle.save(temp_bundle.path())?;
 
     if c.recreate {
@@ -354,7 +341,7 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
                     let charm = CharmSource::load(&charm_path)
                         .with_context(|_| charm_path.display().to_string())?;
 
-                    charm.build(name)?;
+                    charm.build(name, c.destructive_mode)?;
                     let rev_url = charm.push(
                         &cs_url
                             .with_namespace(c.publish_namespace.clone())
@@ -504,6 +491,7 @@ fn export(c: ExportConfig) -> Result<(), Error> {
 
 fn main() -> Result<(), Error> {
     match Config::from_args() {
+        Config::Build(c) => build(c),
         Config::Deploy(c) => deploy(c),
         Config::Remove(c) => remove(c),
         Config::Publish(c) => publish(c),
