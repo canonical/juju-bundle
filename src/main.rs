@@ -46,6 +46,10 @@ struct BuildConfig {
     #[structopt(long = "destructive-mode")]
     #[structopt(help = "Build charmcraft charms with `--destructive-mode` flag")]
     destructive_mode: bool,
+
+    #[structopt(long = "serial")]
+    #[structopt(help = "If set, only one charm will be built and published at a time")]
+    serial: bool,
 }
 
 /// CLI arguments for the `deploy` subcommand.
@@ -62,6 +66,10 @@ struct DeployConfig {
     #[structopt(long = "build")]
     #[structopt(help = "Build the bundle before deploying it. Requires `source:` to be defined")]
     build: bool,
+
+    #[structopt(long = "serial")]
+    #[structopt(help = "If set, only one charm will be built and published at a time")]
+    serial: bool,
 
     #[structopt(long = "destructive-mode")]
     #[structopt(help = "Build charmcraft charms with `--destructive-mode` flag")]
@@ -215,7 +223,8 @@ fn build(c: BuildConfig) -> Result<(), Error> {
 
     let mut bundle = Bundle::load(c.bundle.clone())?;
 
-    bundle.build(&c.bundle, c.apps.clone(), c.exceptions, c.destructive_mode)?;
+    bundle.limit_apps(&c.apps[..], &c.exceptions[..])?;
+    bundle.build(&c.bundle, c.destructive_mode, !c.serial)?;
 
     bundle.save(&c.output_bundle)?;
 
@@ -230,7 +239,8 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
 
     let mut bundle = Bundle::load(c.bundle.clone())?;
 
-    bundle.build(&c.bundle, c.apps.clone(), c.exceptions, c.destructive_mode)?;
+    bundle.limit_apps(&c.apps[..], &c.exceptions[..])?;
+    bundle.build(&c.bundle, c.destructive_mode, !c.serial)?;
 
     // If we're only upgrading charms, we can skip the rest of the logic
     // that is concerned with tearing down and/or deploying the charms.
@@ -285,8 +295,9 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
 
 /// Run `remove` subcommand
 fn remove(c: RemoveConfig) -> Result<(), Error> {
-    let bundle = Bundle::load(c.bundle)?;
-    for name in bundle.app_subset(c.apps, vec![])?.keys() {
+    let mut bundle = Bundle::load(c.bundle)?;
+    bundle.limit_apps(&c.apps[..], &[])?;
+    for name in bundle.applications.keys() {
         Command::new("juju")
             .args(&["remove-application", name])
             .spawn()?
