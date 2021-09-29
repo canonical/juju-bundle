@@ -8,8 +8,8 @@ edition = "2018"
 clap = "=3.0.0-beta.2"
 ex = "0.1"
 failure = "0.1"
-juju-rs = { git = "https://github.com/knkski/rust-libjuju.git", rev = "73f46b6" }
+juju-rs = { git = "https://github.com/knkski/rust-libjuju.git", rev = "14c47f3" }
 rayon = "1.3"
-structopt = "0.2"
+structopt = "0.3"
 tempfile = "3.1"
 petgraph = "0.5"

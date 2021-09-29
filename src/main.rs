@@ -1,5 +1,6 @@
 //! Juju plugin for interacting with a bundle
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,19 +21,43 @@ use juju::charm_url::CharmURL;
 use juju::cmd::run;
 use juju::paths;
 
-/// CLI arguments for the `deploy` subcommand.
+// Helper function for parsing `key=value` pairs passed in on the CLI
+fn parse_key_val(s: &str) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    let pos = s.find('=');
+
+    match pos {
+        Some(pos) => Ok((s[..pos].into(), Some(s[pos + 1..].into()))),
+        None => Ok((s.into(), None)),
+    }
+}
+
+// Helper function for ensure user has hasn't specified invalid values
+fn ensure_subset(subset: &HashSet<&String>, superset: &HashSet<&String>) -> Result<(), Error> {
+    // Make sure user hasn't passed in any invalid application names
+    let diff: Vec<_> = subset
+        .difference(&superset)
+        .into_iter()
+        .cloned()
+        .map(String::as_ref)
+        .collect();
+
+    if diff.is_empty() {
+        Ok(())
+    } else {
+        Err(format_err!("Apps not found in bundle: {}", diff.join(", ")))
+    }
+}
+
+/// CLI arguments for the `build` subcommand.
 #[derive(StructOpt, Debug)]
 struct BuildConfig {
-    #[structopt(short = "a", long = "app")]
-    #[structopt(help = "Select particular apps to deploy")]
-    apps: Vec<String>,
-
-    #[structopt(short = "e", long = "except")]
-    #[structopt(help = "Select particular apps to skip deploying")]
-    exceptions: Vec<String>,
+    #[structopt(long = "app")]
+    #[structopt(parse(try_from_str = parse_key_val))]
+    #[structopt(help = "If specified, only these apps will be built")]
+    apps: Vec<(String, Option<String>)>,
 
     #[structopt(short = "b", long = "bundle", default_value = "bundle.yaml")]
-    #[structopt(help = "The bundle file to deploy")]
+    #[structopt(help = "The bundle file to build")]
     bundle: String,
 
     #[structopt(
@@ -48,7 +73,7 @@ struct BuildConfig {
     destructive_mode: bool,
 
     #[structopt(long = "serial")]
-    #[structopt(help = "If set, only one charm will be built and published at a time")]
+    #[structopt(help = "Build only one charm at a time")]
     serial: bool,
 }
 
@@ -64,11 +89,12 @@ struct DeployConfig {
     upgrade_charms: bool,
 
     #[structopt(long = "build")]
-    #[structopt(help = "Build the bundle before deploying it. Requires `source:` to be defined")]
-    build: bool,
+    #[structopt(parse(try_from_str = parse_key_val))]
+    #[structopt(help = "Build the bundle before deploying it")]
+    build: Option<Vec<(String, Option<String>)>>,
 
     #[structopt(long = "serial")]
-    #[structopt(help = "If set, only one charm will be built and published at a time")]
+    #[structopt(help = "If set, only one charm will be built at a time")]
     serial: bool,
 
     #[structopt(long = "destructive-mode")]
@@ -89,7 +115,7 @@ struct DeployConfig {
 
     #[structopt(short = "b", long = "bundle", default_value = "bundle.yaml")]
     #[structopt(help = "The bundle file to deploy")]
-    bundle: String,
+    bundle_path: String,
 
     #[structopt(name = "deploy-args")]
     #[structopt(help = "Arguments that are collected and passed on to `juju deploy`")]
@@ -176,8 +202,8 @@ struct ExportConfig {
 
 /// Interact with a bundle and the charms contained therein.
 #[derive(StructOpt, Debug)]
-#[structopt(raw(setting = "AppSettings::TrailingVarArg"))]
-#[structopt(raw(setting = "AppSettings::SubcommandRequiredElseHelp"))]
+#[structopt(setting = AppSettings::TrailingVarArg)]
+#[structopt(setting = AppSettings::SubcommandRequiredElseHelp)]
 enum Config {
     /// Builds a bundle
     ///
@@ -223,8 +249,17 @@ fn build(c: BuildConfig) -> Result<(), Error> {
 
     let mut bundle = Bundle::load(c.bundle.clone())?;
 
-    bundle.limit_apps(&c.apps[..], &c.exceptions[..])?;
-    bundle.build(&c.bundle, c.destructive_mode, !c.serial)?;
+    let build_apps = if c.apps.is_empty() {
+        None
+    } else {
+        let apps: HashMap<_, _> = c.apps.into_iter().collect();
+        let to_build = apps.keys().into_iter().collect();
+        let existing = bundle.applications.keys().into_iter().collect();
+        ensure_subset(&to_build, &existing)?;
+        Some(apps)
+    };
+
+    bundle.build(&c.bundle, build_apps, c.destructive_mode, !c.serial)?;
 
     bundle.save(&c.output_bundle)?;
 
@@ -235,12 +270,29 @@ fn build(c: BuildConfig) -> Result<(), Error> {
 
 /// Run `deploy` subcommand
 fn deploy(c: DeployConfig) -> Result<(), Error> {
-    println!("Building and deploying bundle from {}", c.bundle);
+    println!("Building and deploying bundle from {}", c.bundle_path);
 
-    let mut bundle = Bundle::load(c.bundle.clone())?;
+    let mut bundle = Bundle::load(&c.bundle_path)?;
 
     bundle.limit_apps(&c.apps[..], &c.exceptions[..])?;
-    bundle.build(&c.bundle, c.destructive_mode, !c.serial)?;
+
+    // We can have one of three situations:
+    //
+    //  - No flag passed: Don't build anything / skip calling `bundle.build`
+    //  - One plain `--build` flag: Build everything that can be built / call `bundle.build` with `None`
+    //  - Multiple apps defined via `--build`: Build only those apps / call `bundle.build` with a HashMap of those apps
+    if let Some(build) = c.build {
+        let build_apps = if build.is_empty() {
+            None
+        } else {
+            let apps: HashMap<_, _> = build.into_iter().collect();
+            let to_build = apps.keys().into_iter().collect();
+            let existing = bundle.applications.keys().into_iter().collect();
+            ensure_subset(&to_build, &existing)?;
+            Some(apps)
+        };
+        bundle.build(&c.bundle_path, build_apps, c.destructive_mode, !c.serial)?;
+    }
 
     // If we're only upgrading charms, we can skip the rest of the logic
     // that is concerned with tearing down and/or deploying the charms.
@@ -255,7 +307,7 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
         println!("\n\nRemoving bundle before deploy.");
         remove(RemoveConfig {
             apps: c.apps.clone(),
-            bundle: c.bundle.clone(),
+            bundle: c.bundle_path.clone(),
         })?;
     }
 
