@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "juju-bundle"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap 3.0.0-beta.2",
  "ex",
@@ -694,7 +694,6 @@ dependencies = [
 [[package]]
 name = "juju-rs"
 version = "0.2.0"
-source = "git+https://github.com/knkski/rust-libjuju.git?rev=14c47f3#14c47f324b63cb9f240341b54000a7d07e5a8d57"
 dependencies = [
  "dirs",
  "ex",

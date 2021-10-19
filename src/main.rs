@@ -3,9 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 
 use ex::fs;
-use failure::{format_err, Error, ResultExt};
+use failure::{format_err, Error};
 use petgraph::{
     dot::{Config as GraphConfig, Dot},
     Graph,
@@ -16,10 +17,8 @@ use tempfile::{NamedTempFile, TempDir};
 
 use juju::bundle::{Application, Bundle};
 use juju::channel::Channel;
-use juju::charm_source::CharmSource;
 use juju::charm_url::CharmURL;
 use juju::cmd::run;
-use juju::paths;
 
 // Helper function for parsing `key=value` pairs passed in on the CLI
 fn parse_key_val(s: &str) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
@@ -35,7 +34,7 @@ fn parse_key_val(s: &str) -> Result<(String, Option<String>), Box<dyn std::error
 fn ensure_subset(subset: &HashSet<&String>, superset: &HashSet<&String>) -> Result<(), Error> {
     // Make sure user hasn't passed in any invalid application names
     let diff: Vec<_> = subset
-        .difference(&superset)
+        .difference(superset)
         .into_iter()
         .cloned()
         .map(String::as_ref)
@@ -139,11 +138,16 @@ struct RemoveConfig {
 struct PublishConfig {
     #[structopt(short = "b", long = "bundle", default_value = "bundle.yaml")]
     #[structopt(help = "The bundle file to publish")]
-    bundle: String,
+    bundle_path: String,
 
     #[structopt(long = "url")]
     #[structopt(help = "The charm store URL for the bundle")]
     cs_url: Option<String>,
+
+    #[structopt(long = "release")]
+    #[structopt(help = "Which channels to release to. Can be specified multiple times")]
+    #[structopt(default_value = "edge")]
+    release_to: Vec<String>,
 
     #[structopt(long = "publish-charms")]
     #[structopt(help = "If set, charms will be built and published")]
@@ -365,11 +369,16 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
             "To use --prune, you must set the --serial flag as well."
         ));
     }
-    let path = c.bundle.as_str();
+    let path = c.bundle_path.as_str();
     let bundle = Bundle::load(path)?;
 
+    // Make sure we're logged in first, so that we don't get a bunch of
+    // login pages spawn with `charm push`.
+    println!("Logging in to charm store, this may open up a browser window.");
+    run("charm", &["login"])?;
+
     let bundle_url = match (&c.cs_url, &bundle.name) {
-        (Some(url), _) => CharmURL::parse(&url)
+        (Some(url), _) => CharmURL::parse(url)
             .map_err(|err| format_err!("Couldn't parse charm URL: {:?}", err))?,
         (None, Some(name)) => CharmURL {
             store: Some("ch".into()),
@@ -384,96 +393,74 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
         }
     };
 
-    // Make sure we're logged in first, so that we don't get a bunch of
-    // login pages spawn with `charm push`.
-    println!("Logging in to charm store, this may open up a browser window.");
-    run("charm", &["login"])?;
+    let publish_namespace = c
+        .publish_namespace
+        .as_ref()
+        .or_else(|| bundle_url.namespace.as_ref());
 
-    let revisions: Result<Vec<(String, String)>, Error> = if c.publish_charms {
-        let publish_handler = |(name, app): (&String, &Application)| {
-            match (&app.charm, &app.source(name, &c.bundle)) {
-                (Some(cs_url), Some(source)) => {
-                    // If `source` starts with `.`, it's a relative path from the bundle we're
-                    // deploying. Otherwise, look in `CHARM_SOURCE_DIR` for it.
-                    let charm_path = if source.starts_with('.') {
-                        PathBuf::from(path).parent().unwrap().join(source)
-                    } else {
-                        paths::charm_source_dir().join(source)
-                    };
+    let helper = |(name, app): (&String, &Application)| {
+        let url = app.charm.as_ref().unwrap();
 
-                    let charm = CharmSource::load(&charm_path)
-                        .with_context(|_| charm_path.display().to_string())?;
+        if url.revision.is_some() {
+            return Ok((name.clone(), url.to_string()));
+        }
 
-                    charm.build(name, c.destructive_mode)?;
-                    let rev_url = charm.push(
-                        &cs_url
-                            .with_namespace(c.publish_namespace.clone())
-                            .to_string(),
-                        &app.resources,
-                    )?;
+        if app.source(name, &c.bundle_path).is_none() {
+            let app = app.clone();
+            let channel = app
+                .channel
+                .map(|c| Channel::from_str(&c))
+                .transpose()?
+                .unwrap_or(Channel::Stable);
+            let revision = url.show(channel)?.id_revision.revision;
+            return Ok((name.clone(), url.with_revision(Some(revision)).to_string()));
+        }
 
-                    charm.promote(&rev_url, Channel::Edge)?;
-
-                    if c.prune {
-                        run("docker", &["system", "prune", "-af"])?;
-                    }
-
-                    Ok((name.clone(), rev_url))
-                }
-                (Some(charm), None) => {
-                    let revision = charm.show(Channel::Stable)?.id_revision.revision;
-                    Ok((
-                        name.clone(),
-                        charm.with_revision(Some(revision)).to_string(),
-                    ))
-                }
-                (None, _) => Err(format_err!("Charm URL required: {}", name)),
-            }
+        let rev_url = match bundle_url.store.as_ref().unwrap().as_ref() {
+            "ch" => app.upload_charmhub(
+                name,
+                publish_namespace.cloned(),
+                &c.bundle_path,
+                &c.release_to,
+                c.destructive_mode,
+            )?,
+            "cs" => app.upload_charm_store(
+                name,
+                publish_namespace.cloned(),
+                &c.bundle_path,
+                &c.release_to,
+                c.destructive_mode,
+            )?,
+            store => todo!("Unknown charm store `{}`", store),
         };
 
-        // Build each charm, upload it to the store, then promote that
-        // revision to edge. Return a list of the revision URLs, so that
-        // we can generate a bundle with those exact revisions to upload.
-        if c.serial {
-            bundle.applications.iter().map(publish_handler).collect()
-        } else {
-            bundle
-                .applications
-                .par_iter()
-                .map(publish_handler)
-                .collect()
+        if c.prune {
+            run("docker", &["system", "prune", "-af"])?;
         }
+
+        Ok((name.clone(), rev_url))
+    };
+
+    // Build each charm, upload it to the store, then promote that
+    // revision to edge. Return a list of the revision URLs, so that
+    // we can generate a bundle with those exact revisions to upload.
+    let revisions: Result<Vec<(String, String)>, Error> = if c.serial {
+        bundle.applications.iter().map(helper).collect()
     } else {
-        bundle
-            .applications
-            .par_iter()
-            .map(|(name, app)| match &app.charm {
-                Some(charm) => {
-                    let channel = if app.source(name, &c.bundle).is_some() {
-                        Channel::Edge
-                    } else {
-                        Channel::Stable
-                    };
-                    let revision = charm.show(channel)?.id_revision.revision;
-                    Ok((
-                        name.clone(),
-                        charm.with_revision(Some(revision)).to_string(),
-                    ))
-                }
-                None => Err(format_err!("Charm URL required: {}", name)),
-            })
-            .collect()
+        bundle.applications.par_iter().map(helper).collect()
     };
 
     // Make a copy of the bundle with exact revisions of each charm
     let mut new_bundle = bundle.clone();
 
     for (name, revision) in revisions? {
-        new_bundle
+        let mut app = new_bundle
             .applications
             .get_mut(&name)
-            .expect("App must exist!")
-            .charm = Some(revision.parse().unwrap());
+            .expect("App must exist!");
+
+        app.charm = Some(revision.parse().unwrap());
+        app.channel = None;
     }
 
     // Create a temp dir for the bundle to point `charm` at,
@@ -483,13 +470,13 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
 
     // `charm push` expects this file to exist
     fs::copy(
-        PathBuf::from(&c.bundle).with_file_name("README.md"),
+        PathBuf::from(&c.bundle_path).with_file_name("README.md"),
         dir.path().join("README.md"),
     )?;
 
     // Copy `charmcraft.yaml` if it exists
     let copy_result = fs::copy(
-        PathBuf::from(c.bundle).with_file_name("charmcraft.yaml"),
+        PathBuf::from(c.bundle_path).with_file_name("charmcraft.yaml"),
         dir.path().join("charmcraft.yaml"),
     );
 
@@ -499,7 +486,19 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
         }
     }
 
-    bundle.push(dir.path().to_string_lossy().as_ref(), &bundle_url)?;
+    match bundle_url.store.as_ref().unwrap().as_ref() {
+        "ch" => bundle.upload_charmhub(
+            dir.path().to_string_lossy().as_ref(),
+            &bundle_url,
+            &c.release_to,
+        )?,
+        "cs" => bundle.upload_charm_store(
+            dir.path().to_string_lossy().as_ref(),
+            &bundle_url.to_string(),
+            &c.release_to,
+        )?,
+        store => todo!("Unknown charm store `{}`", store),
+    }
 
     Ok(())
 }
@@ -520,7 +519,7 @@ fn promote(c: PromoteConfig) -> Result<(), Error> {
 
     println!("Bundle charms successfully promoted, promoting bundle.");
 
-    bundle.release(&format!("{}-{}", c.bundle, revision), c.to)?;
+    bundle.release(&format!("{}-{}", c.bundle, revision), &c.to.to_string())?;
 
     Ok(())
 }
