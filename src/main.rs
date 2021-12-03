@@ -17,7 +17,6 @@ use structopt::{self, clap::AppSettings, StructOpt};
 use tempfile::{NamedTempFile, TempDir};
 
 use juju::bundle::{Application, Bundle};
-use juju::channel::Channel;
 use juju::cmd::run;
 
 // Helper function for parsing `key=value` pairs passed in on the CLI
@@ -160,26 +159,6 @@ struct PublishConfig {
     destructive_mode: bool,
 }
 
-/// CLI arguments for the `publish` subcommand.
-#[derive(StructOpt, Debug)]
-struct PromoteConfig {
-    #[structopt(short = "b", long = "bundle")]
-    #[structopt(help = "The bundle file to promote")]
-    bundle: String,
-
-    #[structopt(long = "from")]
-    #[structopt(help = "The bundle channel to promote from")]
-    from: Channel,
-
-    #[structopt(long = "to")]
-    #[structopt(help = "The bundle channel to promote to")]
-    to: Channel,
-
-    #[structopt(short = "a", long = "application")]
-    #[structopt(help = "Select apps to promote with the bundle")]
-    apps: Vec<String>,
-}
-
 /// CLI arguments for the `export` subcommand.
 #[derive(StructOpt, Debug)]
 struct ExportConfig {
@@ -221,14 +200,9 @@ enum Config {
 
     /// Publishes a bundle and its charms to the charm store
     ///
-    /// Publishes them to the edge channel. To migrate the bundle
-    /// and its charms to other channels, use `juju bundle promote`.
+    /// Publishes them to the edge channel.
     #[structopt(name = "publish")]
     Publish(PublishConfig),
-
-    /// Promotes a bundle and its charms from one channel to another
-    #[structopt(name = "promote")]
-    Promote(PromoteConfig),
 
     /// Exports the bundle to different formats, e.g. graphviz
     #[structopt(name = "export")]
@@ -369,9 +343,7 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
         ThreadPoolBuilder::new().num_threads(1).build_global()?;
     }
 
-    // Build each charm, upload it to the store, then promote that
-    // revision to edge. Return a list of the revision URLs, so that
-    // we can generate a bundle with those exact revisions to upload.
+    // Ensure each charm is built and uploaded to each channel
     bundle.applications.par_iter().try_for_each(
         |(name, app): (&String, &Application)| -> Result<(), Error> {
             app.upload_charmhub(name, path, &c.release_to, c.destructive_mode)?;
@@ -422,27 +394,6 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
     })
 }
 
-/// Run `promote` subcommand
-fn promote(c: PromoteConfig) -> Result<(), Error> {
-    let (revision, bundle) = Bundle::load_from_store(&c.bundle, c.from)?;
-
-    println!("Found bundle revision {}", revision);
-
-    for (name, app) in &bundle.applications {
-        if !c.apps.contains(name) {
-            continue;
-        }
-        println!("Promoting {} to {:?}.", name, c.to);
-        app.release(c.to)?;
-    }
-
-    println!("Bundle charms successfully promoted, promoting bundle.");
-
-    bundle.release(&format!("{}-{}", c.bundle, revision), &c.to.to_string())?;
-
-    Ok(())
-}
-
 /// Run `export` subcommand
 fn export(c: ExportConfig) -> Result<(), Error> {
     let bundle = Bundle::load(&c.bundle)?;
@@ -476,7 +427,6 @@ fn main() -> Result<(), Error> {
         Config::Deploy(c) => deploy(c),
         Config::Remove(c) => remove(c),
         Config::Publish(c) => publish(c),
-        Config::Promote(c) => promote(c),
         Config::Export(c) => export(c),
     }
 }
