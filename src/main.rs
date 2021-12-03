@@ -1,9 +1,9 @@
 //! Juju plugin for interacting with a bundle
 
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind as IoErrorKind;
 use std::path::PathBuf;
 use std::process::Command;
-use std::str::FromStr;
 
 use ex::fs;
 use failure::{format_err, Error};
@@ -11,13 +11,13 @@ use petgraph::{
     dot::{Config as GraphConfig, Dot},
     Graph,
 };
-use rayon::prelude::*;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::ThreadPoolBuilder;
 use structopt::{self, clap::AppSettings, StructOpt};
 use tempfile::{NamedTempFile, TempDir};
 
 use juju::bundle::{Application, Bundle};
 use juju::channel::Channel;
-use juju::charm_url::CharmURL;
 use juju::cmd::run;
 
 // Helper function for parsing `key=value` pairs passed in on the CLI
@@ -140,22 +140,10 @@ struct PublishConfig {
     #[structopt(help = "The bundle file to publish")]
     bundle_path: String,
 
-    #[structopt(long = "url")]
-    #[structopt(help = "The charm store URL for the bundle")]
-    cs_url: Option<String>,
-
     #[structopt(long = "release")]
     #[structopt(help = "Which channels to release to. Can be specified multiple times")]
     #[structopt(default_value = "edge")]
     release_to: Vec<String>,
-
-    #[structopt(long = "publish-charms")]
-    #[structopt(help = "If set, charms will be built and published")]
-    publish_charms: bool,
-
-    #[structopt(long = "publish-namespace")]
-    #[structopt(help = "If set, the namespace to publish charms under")]
-    publish_namespace: Option<String>,
 
     #[structopt(long = "serial")]
     #[structopt(help = "If set, only one charm will be built and published at a time")]
@@ -377,130 +365,61 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
     println!("Logging in to charm store, this may open up a browser window.");
     run("charm", &["login"])?;
 
-    let bundle_url = match (&c.cs_url, &bundle.name) {
-        (Some(url), _) => CharmURL::parse(url)
-            .map_err(|err| format_err!("Couldn't parse charm URL: {:?}", err))?,
-        (None, Some(name)) => CharmURL {
-            store: Some("ch".into()),
-            namespace: None,
-            name: name.clone(),
-            revision: None,
-        },
-        (None, None) => {
-            return Err(format_err!(
-                "Need to specify either a bundle URL or declare name field in bundle.yaml"
-            ))
-        }
-    };
-
-    let publish_namespace = c
-        .publish_namespace
-        .as_ref()
-        .or_else(|| bundle_url.namespace.as_ref());
-
-    let helper = |(name, app): (&String, &Application)| {
-        let url = app.charm.as_ref().unwrap();
-
-        if url.revision.is_some() {
-            return Ok((name.clone(), url.to_string()));
-        }
-
-        if app.source(name, &c.bundle_path).is_none() {
-            let app = app.clone();
-            let channel = app
-                .channel
-                .map(|c| Channel::from_str(&c))
-                .transpose()?
-                .unwrap_or(Channel::Stable);
-            let revision = url.show(channel)?.id_revision.revision;
-            return Ok((name.clone(), url.with_revision(Some(revision)).to_string()));
-        }
-
-        let rev_url = match bundle_url.store.as_ref().unwrap().as_ref() {
-            "ch" => app.upload_charmhub(
-                name,
-                publish_namespace.cloned(),
-                &c.bundle_path,
-                &c.release_to,
-                c.destructive_mode,
-            )?,
-            "cs" => app.upload_charm_store(
-                name,
-                publish_namespace.cloned(),
-                &c.bundle_path,
-                &c.release_to,
-                c.destructive_mode,
-            )?,
-            store => todo!("Unknown charm store `{}`", store),
-        };
-
-        if c.prune {
-            run("docker", &["system", "prune", "-af"])?;
-        }
-
-        Ok((name.clone(), rev_url))
-    };
+    if c.serial {
+        ThreadPoolBuilder::new().num_threads(1).build_global()?;
+    }
 
     // Build each charm, upload it to the store, then promote that
     // revision to edge. Return a list of the revision URLs, so that
     // we can generate a bundle with those exact revisions to upload.
-    let revisions: Result<Vec<(String, String)>, Error> = if c.serial {
-        bundle.applications.iter().map(helper).collect()
-    } else {
-        bundle.applications.par_iter().map(helper).collect()
-    };
+    bundle.applications.par_iter().try_for_each(
+        |(name, app): (&String, &Application)| -> Result<(), Error> {
+            app.upload_charmhub(name, path, &c.release_to, c.destructive_mode)?;
+            if c.prune {
+                run("docker", &["system", "prune", "-af"])?;
+            }
 
-    // Make a copy of the bundle with exact revisions of each charm
-    let mut new_bundle = bundle.clone();
-
-    for (name, revision) in revisions? {
-        let mut app = new_bundle
-            .applications
-            .get_mut(&name)
-            .expect("App must exist!");
-
-        app.charm = Some(revision.parse().unwrap());
-        app.channel = None;
-    }
-
-    // Create a temp dir for the bundle to point `charm` at,
-    // since we don't want to modify the existing bundle.yaml file.
-    let dir = TempDir::new()?;
-    new_bundle.save(dir.path().join("bundle.yaml"))?;
-
-    // `charm push` expects this file to exist
-    fs::copy(
-        PathBuf::from(&c.bundle_path).with_file_name("README.md"),
-        dir.path().join("README.md"),
+            Ok(())
+        },
     )?;
 
-    // Copy `charmcraft.yaml` if it exists
-    let copy_result = fs::copy(
-        PathBuf::from(c.bundle_path).with_file_name("charmcraft.yaml"),
-        dir.path().join("charmcraft.yaml"),
-    );
+    c.release_to.par_iter().try_for_each(|channel| {
+        // Make a copy of the bundle with exact revisions of each charm
+        let mut new_bundle = bundle.clone();
 
-    if let Err(err) = copy_result {
-        if err.kind() != ::std::io::ErrorKind::NotFound {
-            return Err(err.into());
+        for (name, app) in new_bundle.applications.iter_mut() {
+            if app.source(name, path).is_some() {
+                app.channel = Some(channel.clone());
+                app.source = None;
+            }
         }
-    }
 
-    match bundle_url.store.as_ref().unwrap().as_ref() {
-        "ch" => bundle.upload_charmhub(
-            dir.path().to_string_lossy().as_ref(),
-            &bundle_url,
-            &c.release_to,
-        )?,
-        "cs" => bundle.upload_charm_store(
-            dir.path().to_string_lossy().as_ref(),
-            &bundle_url.to_string(),
-            &c.release_to,
-        )?,
-        store => todo!("Unknown charm store `{}`", store),
-    }
+        // Create a temp dir for the bundle to point `charm` at,
+        // since we don't want to modify the existing bundle.yaml file.
+        let dir = TempDir::new()?;
+        new_bundle.save(&dir.path().join("bundle.yaml"))?;
 
-    Ok(())
+        // `charm push` expects this file to exist
+        fs::copy(
+            PathBuf::from(path).with_file_name("README.md"),
+            dir.path().join("README.md"),
+        )?;
+
+        // Copy `charmcraft.yaml` if it exists
+        let copy_result = fs::copy(
+            PathBuf::from(path).with_file_name("charmcraft.yaml"),
+            dir.path().join("charmcraft.yaml"),
+        );
+
+        if let Err(err) = copy_result {
+            if err.kind() != IoErrorKind::NotFound {
+                return Err(err.into());
+            }
+        }
+
+        bundle.upload_charmhub(&dir.path().to_string_lossy(), channel)?;
+        Ok(())
+    })
 }
 
 /// Run `promote` subcommand
