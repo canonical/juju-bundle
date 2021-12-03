@@ -361,9 +361,9 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
     let bundle = Bundle::load(path)?;
 
     // Make sure we're logged in first, so that we don't get a bunch of
-    // login pages spawn with `charm push`.
-    println!("Logging in to charm store, this may open up a browser window.");
-    run("charm", &["login"])?;
+    // login pages spawn with `charm upload`.
+    println!("Ensuring valid credentials with `charmcraft whoami`.");
+    run("charmcraft", &["whoami"])?;
 
     if c.serial {
         ThreadPoolBuilder::new().num_threads(1).build_global()?;
