@@ -17,6 +17,7 @@ use structopt::{self, clap::AppSettings, StructOpt};
 use tempfile::{NamedTempFile, TempDir};
 
 use juju::bundle::{Application, Bundle};
+use juju::charm_source::CharmSource;
 use juju::cmd::run;
 
 // Helper function for parsing `key=value` pairs passed in on the CLI
@@ -171,6 +172,14 @@ struct ExportConfig {
     out: Option<String>,
 }
 
+/// CLI arguments for the `verify` subcommand.
+#[derive(StructOpt, Debug)]
+struct VerifyConfig {
+    #[structopt(short = "b", long = "bundle", default_value = "bundle.yaml")]
+    #[structopt(help = "The bundle file to verify")]
+    bundle: String,
+}
+
 /// Interact with a bundle and the charms contained therein.
 #[derive(StructOpt, Debug)]
 #[structopt(setting = AppSettings::TrailingVarArg)]
@@ -207,6 +216,10 @@ enum Config {
     /// Exports the bundle to different formats, e.g. graphviz
     #[structopt(name = "export")]
     Export(ExportConfig),
+
+    /// Does as much static verification of the bundle as possible
+    #[structopt(name = "verify")]
+    Verify(VerifyConfig),
 }
 
 /// Run `build` subcommand
@@ -424,6 +437,22 @@ fn export(c: ExportConfig) -> Result<(), Error> {
     Ok(())
 }
 
+/// Run `verify` subcommand
+fn verify(c: VerifyConfig) -> Result<(), Error> {
+    let bundle = Bundle::load(&c.bundle)?;
+    println!("Checking {}", c.bundle);
+
+    for (name, app) in bundle.applications {
+        if let Some(source) = app.source(&name, &c.bundle) {
+            if let Err(err) = CharmSource::load(&PathBuf::from(source)) {
+                println!("Error for charm {}: {}", name, err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Error> {
     match Config::from_args() {
         Config::Build(c) => build(c),
@@ -431,5 +460,6 @@ fn main() -> Result<(), Error> {
         Config::Remove(c) => remove(c),
         Config::Publish(c) => publish(c),
         Config::Export(c) => export(c),
+        Config::Verify(c) => verify(c),
     }
 }
