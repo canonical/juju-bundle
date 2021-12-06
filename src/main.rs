@@ -357,7 +357,7 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
         },
     )?;
 
-    c.release_to.par_iter().try_for_each(|channel| {
+    for channel in &c.release_to {
         // Make a copy of the bundle with exact revisions of each charm
         let mut new_bundle = bundle.clone();
 
@@ -392,8 +392,9 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
         }
 
         bundle.upload_charmhub(&dir.path().to_string_lossy(), channel)?;
-        Ok(())
-    })
+    }
+
+    Ok(())
 }
 
 /// Run `export` subcommand
