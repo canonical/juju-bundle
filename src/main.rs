@@ -444,7 +444,7 @@ fn verify(c: VerifyConfig) -> Result<(), Error> {
 
     for (name, app) in bundle.applications {
         if let Some(source) = app.source(&name, &c.bundle) {
-            if let Err(err) = CharmSource::load(&PathBuf::from(source)) {
+            if let Err(err) = CharmSource::load(source) {
                 println!("Error for charm {}: {}", name, err);
             }
         }
