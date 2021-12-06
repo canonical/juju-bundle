@@ -346,7 +346,9 @@ fn publish(c: PublishConfig) -> Result<(), Error> {
     // Ensure each charm is built and uploaded to each channel
     bundle.applications.par_iter().try_for_each(
         |(name, app): (&String, &Application)| -> Result<(), Error> {
-            app.upload_charmhub(name, path, &c.release_to, c.destructive_mode)?;
+            if app.source(name, path).is_some() {
+                app.upload_charmhub(name, path, &c.release_to, c.destructive_mode)?;
+            }
             if c.prune {
                 run("docker", &["system", "prune", "-af"])?;
             }
