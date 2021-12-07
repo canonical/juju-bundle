@@ -180,6 +180,14 @@ struct VerifyConfig {
     bundle: String,
 }
 
+/// CLI arguments for the `verify` subcommand.
+#[derive(StructOpt, Debug)]
+struct VerifyCharmConfig {
+    #[structopt(name = "CHARM", default_value = ".")]
+    #[structopt(help = "The charm source directory to verify")]
+    charm: String,
+}
+
 /// Interact with a bundle and the charms contained therein.
 #[derive(StructOpt, Debug)]
 #[structopt(setting = AppSettings::TrailingVarArg)]
@@ -217,9 +225,13 @@ enum Config {
     #[structopt(name = "export")]
     Export(ExportConfig),
 
-    /// Does as much static verification of the bundle as possible
+    /// Does as much static verification of a bundle as possible
     #[structopt(name = "verify")]
     Verify(VerifyConfig),
+
+    /// Does as much static verification of a charm as possible
+    #[structopt(name = "verify-charm")]
+    VerifyCharm(VerifyCharmConfig),
 }
 
 /// Run `build` subcommand
@@ -442,15 +454,33 @@ fn verify(c: VerifyConfig) -> Result<(), Error> {
     let bundle = Bundle::load(&c.bundle)?;
     println!("Checking {}", c.bundle);
 
+    let mut count = 0;
+
     for (name, app) in bundle.applications {
         if let Some(source) = app.source(&name, &c.bundle) {
             if let Err(err) = CharmSource::load(source) {
                 println!("Error for charm {}: {}", name, err);
+                count += 1;
             }
         }
     }
 
-    Ok(())
+    if count > 0 {
+        Err(format_err!("{} issues detected.", count))
+    } else {
+        Ok(())
+    }
+}
+
+/// Run `verify-charm` subcommand
+fn verify_charm(c: VerifyCharmConfig) -> Result<(), Error> {
+    match CharmSource::load(c.charm) {
+        Ok(_) => {
+            println!("No issues detected.");
+            Ok(())
+        }
+        Err(err) => Err(format_err!("{}", err)),
+    }
 }
 
 fn main() -> Result<(), Error> {
@@ -461,5 +491,6 @@ fn main() -> Result<(), Error> {
         Config::Publish(c) => publish(c),
         Config::Export(c) => export(c),
         Config::Verify(c) => verify(c),
+        Config::VerifyCharm(c) => verify_charm(c),
     }
 }
