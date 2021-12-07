@@ -5,8 +5,8 @@ use std::io::ErrorKind as IoErrorKind;
 use std::path::PathBuf;
 use std::process::Command;
 
+use anyhow::{anyhow, Error};
 use ex::fs;
-use failure::{format_err, Error};
 use petgraph::{
     dot::{Config as GraphConfig, Dot},
     Graph,
@@ -43,7 +43,7 @@ fn ensure_subset(subset: &HashSet<&String>, superset: &HashSet<&String>) -> Resu
     if diff.is_empty() {
         Ok(())
     } else {
-        Err(format_err!("Apps not found in bundle: {}", diff.join(", ")))
+        Err(anyhow!("Apps not found in bundle: {}", diff.join(", ")))
     }
 }
 
@@ -311,7 +311,7 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
             .wait()?;
 
         if !exit_status.success() {
-            return Err(format_err!(
+            return Err(anyhow!(
                 "Encountered an error while waiting to deploy: {}",
                 exit_status.to_string()
             ));
@@ -327,7 +327,7 @@ fn deploy(c: DeployConfig) -> Result<(), Error> {
         .wait()?;
 
     if !exit_status.success() {
-        return Err(format_err!(
+        return Err(anyhow!(
             "Encountered an error while deploying bundle: {}",
             exit_status.to_string()
         ));
@@ -352,7 +352,7 @@ fn remove(c: RemoveConfig) -> Result<(), Error> {
 /// Run `publish` subcommand
 fn publish(c: PublishConfig) -> Result<(), Error> {
     if c.prune && !c.serial {
-        return Err(format_err!(
+        return Err(anyhow!(
             "To use --prune, you must set the --serial flag as well."
         ));
     }
@@ -459,6 +459,9 @@ fn verify(c: VerifyConfig) -> Result<(), Error> {
     for (name, app) in bundle.applications {
         if let Some(source) = app.source(&name, &c.bundle) {
             if let Err(err) = CharmSource::load(source) {
+                if count == 0 {
+                    println!("");
+                }
                 println!("Error for charm {}: {}", name, err);
                 count += 1;
             }
@@ -466,7 +469,8 @@ fn verify(c: VerifyConfig) -> Result<(), Error> {
     }
 
     if count > 0 {
-        Err(format_err!("{} issues detected.", count))
+        println!("");
+        Err(anyhow!("{} issues detected.", count))
     } else {
         Ok(())
     }
@@ -479,7 +483,7 @@ fn verify_charm(c: VerifyCharmConfig) -> Result<(), Error> {
             println!("No issues detected.");
             Ok(())
         }
-        Err(err) => Err(format_err!("{}", err)),
+        Err(err) => Err(anyhow!("{}", err)),
     }
 }
 

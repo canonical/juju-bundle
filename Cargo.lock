@@ -27,6 +27,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.51"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b26702f315f53b6071259e15dd9d64528213b44d61de1ec926eca7715d62203"
+
+[[package]]
 name = "arrayvec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -681,9 +687,9 @@ dependencies = [
 name = "juju-bundle"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "clap 3.0.0-beta.2",
  "ex",
- "failure",
  "juju-rs",
  "petgraph",
  "rayon",
@@ -694,11 +700,9 @@ dependencies = [
 [[package]]
 name = "juju-rs"
 version = "0.2.0"
-source = "git+https://github.com/knkski/rust-libjuju.git?rev=e1bc41b#e1bc41b6be65b32ebc5f559df938b60538733a69"
 dependencies = [
  "dirs",
  "ex",
- "failure",
  "nom",
  "rayon",
  "reqwest",
@@ -706,6 +710,7 @@ dependencies = [
  "serde_derive",
  "serde_yaml",
  "tempfile",
+ "thiserror",
  "zip",
 ]
 
