@@ -319,7 +319,6 @@ dependencies = [
 [[package]]
 name = "juju-rs"
 version = "0.2.0"
-source = "git+https://github.com/knkski/rust-libjuju.git?rev=84bec42#84bec42805ed932b558d167fabd9573cb32024eb"
 dependencies = [
  "dirs",
  "ex",
